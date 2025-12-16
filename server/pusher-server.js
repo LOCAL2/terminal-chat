@@ -35,6 +35,21 @@ app.post('/api/chat', async (req, res) => {
   }
 });
 
+app.post('/api/typing', async (req, res) => {
+  const { username, text } = req.body;
+
+  try {
+    await pusher.trigger('chat-channel', 'typing', {
+      username,
+      text
+    });
+    res.json({ success: true });
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ error: 'Failed to send typing' });
+  }
+});
+
 app.listen(3001, () => {
   console.log('Pusher API server running on http://localhost:3001');
 });

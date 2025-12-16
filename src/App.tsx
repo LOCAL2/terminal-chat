@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef } from 'react';
-import type { KeyboardEvent } from 'react';
+import type { KeyboardEvent, ChangeEvent } from 'react';
 import Pusher from 'pusher-js';
 import './App.css';
 
@@ -9,6 +9,12 @@ interface Message {
   username?: string;
   timestamp: number;
   id?: string;
+}
+
+interface TypingUser {
+  username: string;
+  text: string;
+  timestamp: number;
 }
 
 const PUSHER_KEY = import.meta.env.VITE_PUSHER_KEY;
@@ -21,9 +27,11 @@ function App() {
   const [username, setUsername] = useState('');
   const [isConnected, setIsConnected] = useState(false);
   const [isSettingName, setIsSettingName] = useState(true);
+  const [typingUsers, setTypingUsers] = useState<Map<string, TypingUser>>(new Map());
   const terminalRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLInputElement>(null);
   const myMessagesRef = useRef<Set<string>>(new Set());
+  const typingTimeoutRef = useRef<number | null>(null);
 
   useEffect(() => {
     if (!username || isSettingName) return;
@@ -53,15 +61,48 @@ function App() {
     });
 
     channel.bind('message', (data: Message) => {
-      // Skip if this is our own message (already shown optimistically)
       if (data.id && myMessagesRef.current.has(data.id)) {
         myMessagesRef.current.delete(data.id);
         return;
       }
+      // Clear typing indicator when message received
+      if (data.username) {
+        setTypingUsers(prev => {
+          const next = new Map(prev);
+          next.delete(data.username!);
+          return next;
+        });
+      }
       setMessages(prev => [...prev, data]);
     });
 
+    channel.bind('typing', (data: { username: string; text: string }) => {
+      if (data.username === username) return;
+      setTypingUsers(prev => {
+        const next = new Map(prev);
+        if (data.text) {
+          next.set(data.username, { ...data, timestamp: Date.now() });
+        } else {
+          next.delete(data.username);
+        }
+        return next;
+      });
+    });
+
+    // Cleanup stale typing indicators
+    const cleanupInterval = setInterval(() => {
+      setTypingUsers(prev => {
+        const next = new Map(prev);
+        const now = Date.now();
+        next.forEach((value, key) => {
+          if (now - value.timestamp > 3000) next.delete(key);
+        });
+        return next;
+      });
+    }, 1000);
+
     return () => {
+      clearInterval(cleanupInterval);
       channel.unbind_all();
       pusher.unsubscribe('chat-channel');
       pusher.disconnect();
@@ -73,11 +114,38 @@ function App() {
     if (terminalRef.current) {
       terminalRef.current.scrollTop = terminalRef.current.scrollHeight;
     }
-  }, [messages]);
+  }, [messages, typingUsers]);
 
   useEffect(() => {
     inputRef.current?.focus();
   }, [isSettingName]);
+
+  const sendTyping = async (text: string) => {
+    try {
+      await fetch(`${API_URL}/api/typing`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ username, text })
+      });
+    } catch (error) {
+      // Ignore typing errors
+    }
+  };
+
+  const handleInputChange = (e: ChangeEvent<HTMLInputElement>) => {
+    const value = e.target.value;
+    setInput(value);
+    
+    if (!isSettingName && username) {
+      if (typingTimeoutRef.current) {
+        clearTimeout(typingTimeoutRef.current);
+      }
+      sendTyping(value ? 'typing' : '');
+      typingTimeoutRef.current = window.setTimeout(() => {
+        sendTyping('');
+      }, 2000);
+    }
+  };
 
   const sendMessage = async () => {
     if (!input.trim()) return;
@@ -85,7 +153,6 @@ function App() {
     const msgId = Math.random().toString(36).substring(2, 9);
     const msgContent = input;
     
-    // Optimistic update - show message immediately
     setMessages(prev => [...prev, {
       type: 'chat',
       username,
@@ -95,6 +162,7 @@ function App() {
     }]);
     myMessagesRef.current.add(msgId);
     setInput('');
+    sendTyping('');
     
     try {
       await fetch(`${API_URL}/api/chat`, {
@@ -129,6 +197,8 @@ function App() {
   const formatTime = (ts: number) => {
     return new Date(ts).toLocaleTimeString('en-US', { hour12: false });
   };
+
+  const typingArray = Array.from(typingUsers.values());
 
   return (
     <div className="terminal" onClick={() => inputRef.current?.focus()}>
@@ -181,6 +251,14 @@ function App() {
                 )}
               </div>
             ))}
+            {typingArray.length > 0 && (
+              <div className="typing-indicator">
+                <span className="typing-text">
+                  {typingArray.map(u => u.username).join(', ')} is typing
+                </span>
+                <span className="typing-dots">...</span>
+              </div>
+            )}
           </>
         )}
         
@@ -192,7 +270,7 @@ function App() {
               ref={inputRef}
               type="text"
               value={input}
-              onChange={(e) => setInput(e.target.value)}
+              onChange={handleInputChange}
               onKeyDown={handleKeyDown}
               className="terminal-input"
               autoFocus
