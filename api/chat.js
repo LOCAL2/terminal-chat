@@ -20,7 +20,8 @@ export default async function handler(req, res) {
       type: type || 'chat',
       username,
       content,
-      timestamp: Date.now()
+      timestamp: Date.now(),
+      id: req.body.id
     });
 
     res.status(200).json({ success: true });

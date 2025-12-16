@@ -18,14 +18,15 @@ const pusher = new Pusher({
 });
 
 app.post('/api/chat', async (req, res) => {
-  const { username, content, type } = req.body;
+  const { username, content, type, id } = req.body;
 
   try {
     await pusher.trigger('chat-channel', 'message', {
       type: type || 'chat',
       username,
       content,
-      timestamp: Date.now()
+      timestamp: Date.now(),
+      id
     });
     res.json({ success: true });
   } catch (error) {

@@ -8,6 +8,7 @@ interface Message {
   content: string;
   username?: string;
   timestamp: number;
+  id?: string;
 }
 
 const PUSHER_KEY = import.meta.env.VITE_PUSHER_KEY;
@@ -17,12 +18,16 @@ const API_URL = import.meta.env.DEV ? 'http://localhost:3001' : '';
 function App() {
   const [messages, setMessages] = useState<Message[]>([]);
   const [input, setInput] = useState('');
-  const [username] = useState(() => 'anon_' + Math.random().toString(36).substring(2, 6));
+  const [username, setUsername] = useState('');
   const [isConnected, setIsConnected] = useState(false);
+  const [isSettingName, setIsSettingName] = useState(true);
   const terminalRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLInputElement>(null);
+  const myMessagesRef = useRef<Set<string>>(new Set());
 
   useEffect(() => {
+    if (!username || isSettingName) return;
+
     const pusher = new Pusher(PUSHER_KEY, {
       cluster: PUSHER_CLUSTER,
     });
@@ -48,6 +53,11 @@ function App() {
     });
 
     channel.bind('message', (data: Message) => {
+      // Skip if this is our own message (already shown optimistically)
+      if (data.id && myMessagesRef.current.has(data.id)) {
+        myMessagesRef.current.delete(data.id);
+        return;
+      }
       setMessages(prev => [...prev, data]);
     });
 
@@ -56,7 +66,7 @@ function App() {
       pusher.unsubscribe('chat-channel');
       pusher.disconnect();
     };
-  }, []);
+  }, [username, isSettingName]);
 
 
   useEffect(() => {
@@ -67,10 +77,24 @@ function App() {
 
   useEffect(() => {
     inputRef.current?.focus();
-  }, []);
+  }, [isSettingName]);
 
   const sendMessage = async () => {
     if (!input.trim()) return;
+    
+    const msgId = Math.random().toString(36).substring(2, 9);
+    const msgContent = input;
+    
+    // Optimistic update - show message immediately
+    setMessages(prev => [...prev, {
+      type: 'chat',
+      username,
+      content: msgContent,
+      timestamp: Date.now(),
+      id: msgId
+    }]);
+    myMessagesRef.current.add(msgId);
+    setInput('');
     
     try {
       await fetch(`${API_URL}/api/chat`, {
@@ -79,10 +103,10 @@ function App() {
         body: JSON.stringify({
           type: 'chat',
           username,
-          content: input
+          content: msgContent,
+          id: msgId
         })
       });
-      setInput('');
     } catch (error) {
       console.error('Failed to send message:', error);
     }
@@ -90,7 +114,15 @@ function App() {
 
   const handleKeyDown = (e: KeyboardEvent<HTMLInputElement>) => {
     if (e.key === 'Enter') {
-      sendMessage();
+      if (isSettingName) {
+        if (input.trim()) {
+          setUsername(input.trim());
+          setIsSettingName(false);
+          setInput('');
+        }
+      } else {
+        sendMessage();
+      }
     }
   };
 
@@ -122,25 +154,38 @@ function App() {
         </div>
         <p className="welcome-text">[SYSTEM] Welcome to Secure Terminal Chat</p>
         <p className="welcome-text">[SYSTEM] All messages are encrypted end-to-end</p>
-        <p className="welcome-text">[SYSTEM] Your handle: {username}</p>
-        <br />
         
-        {messages.map((msg, i) => (
-          <div key={i} className={`message ${msg.type}`}>
-            {msg.type === 'system' ? (
-              <span className="system-msg">{msg.content}</span>
-            ) : (
-              <>
-                <span className="timestamp">[{formatTime(msg.timestamp)}]</span>
-                <span className="username"> {msg.username}@terminal:</span>
-                <span className="content"> {msg.content}</span>
-              </>
-            )}
-          </div>
-        ))}
+        {isSettingName ? (
+          <>
+            <br />
+            <div className="login-prompt">
+              <p className="blink-text">{'>'} AUTHENTICATION REQUIRED {'<'}</p>
+              <p className="welcome-text">[SYSTEM] Enter your handle to access the secure channel</p>
+              <p className="welcome-text">[SYSTEM] Type your name and press ENTER</p>
+            </div>
+          </>
+        ) : (
+          <>
+            <p className="welcome-text">[SYSTEM] Logged in as: {username}</p>
+            <br />
+            {messages.map((msg, i) => (
+              <div key={i} className={`message ${msg.type}`}>
+                {msg.type === 'system' ? (
+                  <span className="system-msg">{msg.content}</span>
+                ) : (
+                  <>
+                    <span className="timestamp">[{formatTime(msg.timestamp)}]</span>
+                    <span className="username"> {msg.username}@terminal:</span>
+                    <span className="content"> {msg.content}</span>
+                  </>
+                )}
+              </div>
+            ))}
+          </>
+        )}
         
         <div className="input-line">
-          <span className="prompt">{username}@secure:~$ </span>
+          <span className="prompt">{isSettingName ? 'guest' : username}@secure:~$ </span>
           <span className="input-wrapper">
             <span className="input-mirror">{input}</span>
             <input
