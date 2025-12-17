@@ -1,6 +1,7 @@
 import express from 'express';
 import cors from 'cors';
 import Pusher from 'pusher';
+import crypto from 'crypto';
 import dotenv from 'dotenv';
 
 dotenv.config({ path: '../.env' });
@@ -18,10 +19,14 @@ const pusher = new Pusher({
 });
 
 app.post('/api/chat', async (req, res) => {
-  const { username, content, type, id } = req.body;
+  const { username, content, type, id, room } = req.body;
+
+  if (!room) {
+    return res.status(400).json({ error: 'Room required' });
+  }
 
   try {
-    await pusher.trigger('chat-channel', 'message', {
+    await pusher.trigger(`room-${room}`, 'message', {
       type: type || 'chat',
       username,
       content,
@@ -36,10 +41,14 @@ app.post('/api/chat', async (req, res) => {
 });
 
 app.post('/api/typing', async (req, res) => {
-  const { username, text } = req.body;
+  const { username, text, room } = req.body;
+
+  if (!room) {
+    return res.status(400).json({ error: 'Room required' });
+  }
 
   try {
-    await pusher.trigger('chat-channel', 'typing', {
+    await pusher.trigger(`room-${room}`, 'typing', {
       username,
       text
     });

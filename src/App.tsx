@@ -1,6 +1,7 @@
 import { useState, useEffect, useRef } from 'react';
 import type { KeyboardEvent, ChangeEvent } from 'react';
 import Pusher from 'pusher-js';
+import { AlienText } from './AlienText';
 import './App.css';
 
 interface Message {
@@ -9,6 +10,8 @@ interface Message {
   username?: string;
   timestamp: number;
   id?: string;
+  isAlien?: boolean;
+  alienLength?: number;
 }
 
 interface TypingUser {
@@ -21,12 +24,36 @@ const PUSHER_KEY = import.meta.env.VITE_PUSHER_KEY;
 const PUSHER_CLUSTER = import.meta.env.VITE_PUSHER_CLUSTER;
 const API_URL = import.meta.env.DEV ? 'http://localhost:3001' : '';
 
+// Simple XOR encryption with Unicode support
+const encrypt = (text: string, key: string): string => {
+  if (!key) return text;
+  const encoded = new TextEncoder().encode(text);
+  const keyBytes = new TextEncoder().encode(key);
+  const result = encoded.map((byte, i) => byte ^ keyBytes[i % keyBytes.length]);
+  return btoa(String.fromCharCode(...result));
+};
+
+const decrypt = (encoded: string, key: string): string => {
+  if (!key) return encoded;
+  try {
+    const decoded = atob(encoded);
+    const bytes = new Uint8Array([...decoded].map(c => c.charCodeAt(0)));
+    const keyBytes = new TextEncoder().encode(key);
+    const result = bytes.map((byte, i) => byte ^ keyBytes[i % keyBytes.length]);
+    return new TextDecoder().decode(result);
+  } catch {
+    return encoded;
+  }
+};
+
 function App() {
   const [messages, setMessages] = useState<Message[]>([]);
   const [input, setInput] = useState('');
   const [username, setUsername] = useState('');
+  const [room, setRoom] = useState('');
+  const [secretKey, setSecretKey] = useState('');
   const [isConnected, setIsConnected] = useState(false);
-  const [isSettingName, setIsSettingName] = useState(true);
+  const [step, setStep] = useState<'name' | 'room' | 'chat'>('name');
   const [typingUsers, setTypingUsers] = useState<Map<string, TypingUser>>(new Map());
   const terminalRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLInputElement>(null);
@@ -34,19 +61,20 @@ function App() {
   const typingTimeoutRef = useRef<number | null>(null);
 
   useEffect(() => {
-    if (!username || isSettingName) return;
+    if (step !== 'chat' || !room) return;
 
     const pusher = new Pusher(PUSHER_KEY, {
       cluster: PUSHER_CLUSTER,
     });
 
-    const channel = pusher.subscribe('chat-channel');
+    // Subscribe to room-specific channel
+    const channel = pusher.subscribe(`room-${room}`);
 
     pusher.connection.bind('connected', () => {
       setIsConnected(true);
       setMessages(prev => [...prev, {
         type: 'system',
-        content: '[SYSTEM] Connection established...',
+        content: '[SYSTEM] Secure connection established...',
         timestamp: Date.now()
       }]);
     });
@@ -65,7 +93,6 @@ function App() {
         myMessagesRef.current.delete(data.id);
         return;
       }
-      // Clear typing indicator when message received
       if (data.username) {
         setTypingUsers(prev => {
           const next = new Map(prev);
@@ -73,7 +100,23 @@ function App() {
           return next;
         });
       }
-      setMessages(prev => [...prev, data]);
+      // Decrypt with room name as key
+      let decrypted = '';
+      let isAlien = true;
+      try {
+        decrypted = decrypt(data.content, secretKey);
+        // Allow: ASCII printable + all Thai characters (U+0E00-U+0E7F)
+        const validPattern = /^[\x20-\x7E\u0E00-\u0E7F]+$/;
+        isAlien = !validPattern.test(decrypted) || decrypted.length === 0;
+      } catch {
+        isAlien = true;
+      }
+      setMessages(prev => [...prev, {
+        ...data,
+        content: isAlien ? '' : decrypted,
+        isAlien,
+        alienLength: Math.max(10, data.content.length)
+      }]);
     });
 
     channel.bind('typing', (data: { username: string; text: string }) => {
@@ -89,7 +132,6 @@ function App() {
       });
     });
 
-    // Cleanup stale typing indicators
     const cleanupInterval = setInterval(() => {
       setTypingUsers(prev => {
         const next = new Map(prev);
@@ -104,10 +146,10 @@ function App() {
     return () => {
       clearInterval(cleanupInterval);
       channel.unbind_all();
-      pusher.unsubscribe('chat-channel');
+      pusher.unsubscribe(`room-${room}`);
       pusher.disconnect();
     };
-  }, [username, isSettingName]);
+  }, [step, room, secretKey, username]);
 
 
   useEffect(() => {
@@ -118,17 +160,17 @@ function App() {
 
   useEffect(() => {
     inputRef.current?.focus();
-  }, [isSettingName]);
+  }, [step]);
 
   const sendTyping = async (text: string) => {
     try {
       await fetch(`${API_URL}/api/typing`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ username, text })
+        body: JSON.stringify({ username, text, room })
       });
-    } catch (error) {
-      // Ignore typing errors
+    } catch {
+      // Ignore
     }
   };
 
@@ -136,7 +178,7 @@ function App() {
     const value = e.target.value;
     setInput(value);
     
-    if (!isSettingName && username) {
+    if (step === 'chat' && username) {
       if (typingTimeoutRef.current) {
         clearTimeout(typingTimeoutRef.current);
       }
@@ -152,6 +194,7 @@ function App() {
     
     const msgId = Math.random().toString(36).substring(2, 9);
     const msgContent = input;
+    const encrypted = encrypt(msgContent, secretKey);
     
     setMessages(prev => [...prev, {
       type: 'chat',
@@ -171,8 +214,9 @@ function App() {
         body: JSON.stringify({
           type: 'chat',
           username,
-          content: msgContent,
-          id: msgId
+          content: encrypted,
+          id: msgId,
+          room
         })
       });
     } catch (error) {
@@ -181,13 +225,18 @@ function App() {
   };
 
   const handleKeyDown = (e: KeyboardEvent<HTMLInputElement>) => {
-    if (e.key === 'Enter') {
-      if (isSettingName) {
-        if (input.trim()) {
-          setUsername(input.trim());
-          setIsSettingName(false);
-          setInput('');
-        }
+    if (e.key === 'Enter' && input.trim()) {
+      if (step === 'name') {
+        setUsername(input.trim());
+        setInput('');
+        setStep('room');
+      } else if (step === 'room') {
+        const roomInput = input.trim();
+        // Room name is also the encryption key
+        setRoom(roomInput);
+        setSecretKey(roomInput);
+        setInput('');
+        setStep('chat');
       } else {
         sendMessage();
       }
@@ -199,6 +248,12 @@ function App() {
   };
 
   const typingArray = Array.from(typingUsers.values());
+
+  const getPromptText = () => {
+    if (step === 'name') return 'guest';
+    if (step === 'room') return username;
+    return username;
+  };
 
   return (
     <div className="terminal" onClick={() => inputRef.current?.focus()}>
@@ -225,18 +280,32 @@ function App() {
         <p className="welcome-text">[SYSTEM] Welcome to Secure Terminal Chat</p>
         <p className="welcome-text">[SYSTEM] All messages are encrypted end-to-end</p>
         
-        {isSettingName ? (
+        {step === 'name' && (
           <>
             <br />
             <div className="login-prompt">
               <p className="blink-text">{'>'} AUTHENTICATION REQUIRED {'<'}</p>
-              <p className="welcome-text">[SYSTEM] Enter your handle to access the secure channel</p>
-              <p className="welcome-text">[SYSTEM] Type your name and press ENTER</p>
+              <p className="welcome-text">[SYSTEM] Enter your handle to continue</p>
             </div>
           </>
-        ) : (
+        )}
+
+        {step === 'room' && (
+          <>
+            <br />
+            <div className="login-prompt">
+              <p className="blink-text">{'>'} ROOM KEY REQUIRED {'<'}</p>
+              <p className="welcome-text">[SYSTEM] Enter secret room key</p>
+              <p className="welcome-text">[SYSTEM] Share this key with friends to chat</p>
+              <p className="welcome-text">[SYSTEM] Wrong key = different room + alien text</p>
+            </div>
+          </>
+        )}
+
+        {step === 'chat' && (
           <>
             <p className="welcome-text">[SYSTEM] Logged in as: {username}</p>
+            <p className="welcome-text">[SYSTEM] Room: [ENCRYPTED]</p>
             <br />
             {messages.map((msg, i) => (
               <div key={i} className={`message ${msg.type}`}>
@@ -246,7 +315,7 @@ function App() {
                   <>
                     <span className="timestamp">[{formatTime(msg.timestamp)}]</span>
                     <span className="username"> {msg.username}@terminal:</span>
-                    <span className="content"> {msg.content}</span>
+                    <span className="content"> {msg.isAlien ? <AlienText length={msg.alienLength || 10} /> : msg.content}</span>
                   </>
                 )}
               </div>
@@ -263,12 +332,12 @@ function App() {
         )}
         
         <div className="input-line">
-          <span className="prompt">{isSettingName ? 'guest' : username}@secure:~$ </span>
+          <span className="prompt">{getPromptText()}@secure:~$ </span>
           <span className="input-wrapper">
-            <span className="input-mirror">{input}</span>
+            <span className="input-mirror">{step === 'room' ? '•'.repeat(input.length) : input}</span>
             <input
               ref={inputRef}
-              type="text"
+              type={step === 'room' ? 'password' : 'text'}
               value={input}
               onChange={handleInputChange}
               onKeyDown={handleKeyDown}

@@ -13,10 +13,14 @@ export default async function handler(req, res) {
     return res.status(405).json({ error: 'Method not allowed' });
   }
 
-  const { username, text } = req.body;
+  const { username, text, room } = req.body;
+
+  if (!room) {
+    return res.status(400).json({ error: 'Room required' });
+  }
 
   try {
-    await pusher.trigger('chat-channel', 'typing', {
+    await pusher.trigger(`room-${room}`, 'typing', {
       username,
       text
     });
